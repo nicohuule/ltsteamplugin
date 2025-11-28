@@ -28,7 +28,7 @@
         "Confirm": "Xác Nhận",
         "Discord": "Discord",
         "Dismiss": "Bỏ qua",
-        "Downloading...": "Đang tải xuống...",
+        "Downloading...": "Đang tải...",
         "Downloading: {percent}%": "Đang tải: {percent}%",
         "Downloading…": "Đang tải xuống…",
         "Error applying fix": "Lỗi thực hiện bản fix",
@@ -138,3 +138,4 @@
     }
 
 }
+
