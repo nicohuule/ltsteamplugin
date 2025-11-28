@@ -45,13 +45,13 @@
         "Failed to start un-fix": "Bắt đầu un-fix thất bại",
         "Failed: {error}": "Thất bại bởi: {error}",
         "Fetch Free API's": "Tải API miễn phí",
-        "Fetching game name...": "Đang timf tên game...",
+        "Fetching game name...": "Đang tìm tên game...",
         "Finishing…": "Đang hoàn tất…",
         "Fixes Menu": "Fixes Menu",
         "Game added!": "Đã thêm game!",
         "Game folder": "Thư mục của game",
         "Game install path not found": "Không tìm thấy đường dẫn thư mục game",
-        "Generic Fix": "Bản vá chung",
+        "Generic Fix": "Bản fixfix chung",
         "Generic fix found!": "Đã tìm thấy bản fix !",
         "Hide": "Ẩn",
         "Installing…": "Đang tải xuống…",
@@ -136,4 +136,5 @@
         "settings.unsaved": "Các thay đổi chưa được lưu",
         "{fix} applied successfully!": "Đã áp dụng {fix} thành công!"
     }
+
 }
