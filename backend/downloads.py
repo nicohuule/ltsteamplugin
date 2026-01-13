@@ -8,7 +8,8 @@ import os
 import re
 import threading
 import time
-from typing import Dict
+import datetime
+from typing import Any, Dict
 
 import Millennium  # type: ignore
 
@@ -22,12 +23,13 @@ from config import (
     WEB_UI_JS_FILE,
 )
 from http_client import ensure_http_client
+import httpx
 from logger import logger
 from paths import backend_path, public_path
 from steam_utils import detect_steam_install_path, has_lua_for_app
 from utils import count_apis, ensure_temp_download_dir, normalize_manifest_text, read_text, write_text
 
-DOWNLOAD_STATE: Dict[int, Dict[str, any]] = {}
+DOWNLOAD_STATE: Dict[int, Dict[str, Any]] = {}
 DOWNLOAD_LOCK = threading.Lock()
 
 # Cache for app names to avoid repeated API calls
@@ -45,6 +47,14 @@ APPLIST_LOCK = threading.Lock()
 APPLIST_FILE_NAME = "all-appids.json"
 APPLIST_URL = "https://applist.morrenus.xyz/"
 APPLIST_DOWNLOAD_TIMEOUT = 300  # 5 minutes for large file
+
+GAMES_DB_FILE_NAME = "games.json"
+GAMES_DB_URL = "https://toolsdb.piqseu.cc/games.json"
+
+# In-memory games database cache and lock (defined to avoid undefined variable)
+GAMES_DB_DATA: Dict[int, Any] = {}
+GAMES_DB_LOADED = False
+GAMES_DB_LOCK = threading.Lock()
 
 
 def _set_download_state(appid: int, update: dict) -> None:
@@ -93,20 +103,26 @@ def _fetch_app_name(appid: int) -> str:
         return applist_name
 
     # Steam API as final resort (web request)
-    # Rate limiting: wait if needed
+    # Rate limiting: wait if needed (outside lock to avoid blocking other threads)
     with APP_NAME_CACHE_LOCK:
         time_since_last_call = time.time() - LAST_API_CALL_TIME
-        if time_since_last_call < API_CALL_MIN_INTERVAL:
-            time.sleep(API_CALL_MIN_INTERVAL - time_since_last_call)
+        sleep_time = API_CALL_MIN_INTERVAL - time_since_last_call if time_since_last_call < API_CALL_MIN_INTERVAL else 0
+    
+    if sleep_time > 0:
+        time.sleep(sleep_time)
+    
+    with APP_NAME_CACHE_LOCK:
         LAST_API_CALL_TIME = time.time()
 
     client = ensure_http_client("LuaTools: _fetch_app_name")
     try:
         url = f"https://store.steampowered.com/api/appdetails?appids={appid}"
+        logger.log(f"LuaTools: Fetching app name for {appid} from Steam API")
         resp = client.get(url, follow_redirects=True, timeout=10)
+        logger.log(f"LuaTools: Steam API response for {appid}: status={resp.status_code}")
         resp.raise_for_status()
         data = resp.json()
-        entry = data.get(str(appid)) or data.get(int(appid)) or {}
+        entry = data.get(str(appid)) or {}
         if isinstance(entry, dict):
             inner = entry.get("data") or {}
             name = inner.get("name")
@@ -296,8 +312,6 @@ def _load_applist_into_memory() -> None:
 
 def _get_app_name_from_applist(appid: int) -> str:
     """Get app name from in-memory applist."""
-    global APPLIST_DATA, APPLIST_LOADED
-    
     # Ensure applist is loaded
     if not APPLIST_LOADED:
         _load_applist_into_memory()
@@ -318,7 +332,9 @@ def _ensure_applist_file() -> None:
     client = ensure_http_client("LuaTools: DownloadApplist")
     
     try:
+        logger.log(f"LuaTools: Downloading applist from {APPLIST_URL}")
         resp = client.get(APPLIST_URL, follow_redirects=True, timeout=APPLIST_DOWNLOAD_TIMEOUT)
+        logger.log(f"LuaTools: Applist download response: status={resp.status_code}")
         resp.raise_for_status()
         
         # Validate JSON format before saving
@@ -347,6 +363,79 @@ def init_applist() -> None:
         _load_applist_into_memory()
     except Exception as exc:
         logger.warn(f"LuaTools: Applist initialization failed: {exc}")
+
+
+def _games_db_file_path() -> str:
+    """Get the path to the games database JSON file."""
+    temp_dir = ensure_temp_download_dir()
+    return os.path.join(temp_dir, GAMES_DB_FILE_NAME)
+
+
+def _load_games_db_into_memory() -> None:
+    """Load the games database JSON file into memory."""
+    global GAMES_DB_DATA, GAMES_DB_LOADED
+    
+    with GAMES_DB_LOCK:
+        if GAMES_DB_LOADED:
+            return
+        
+        file_path = _games_db_file_path()
+        if not os.path.exists(file_path):
+            logger.log("LuaTools: Games DB file not found, skipping load")
+            GAMES_DB_LOADED = True
+            return
+        
+        try:
+            logger.log("LuaTools: Loading Games DB into memory...")
+            with open(file_path, "r", encoding="utf-8") as handle:
+                GAMES_DB_DATA = json.load(handle)
+            
+            logger.log(f"LuaTools: Loaded Games DB ({len(GAMES_DB_DATA)} entries)")
+            GAMES_DB_LOADED = True
+        except Exception as exc:
+            logger.warn(f"LuaTools: Failed to load Games DB: {exc}")
+            GAMES_DB_LOADED = True
+
+
+def _ensure_games_db_file() -> None:
+    """Download the games database file."""
+    file_path = _games_db_file_path()
+    
+    logger.log("LuaTools: Downloading Games DB...")
+    client = ensure_http_client("LuaTools: DownloadGamesDB")
+    
+    try:
+        logger.log(f"LuaTools: Downloading Games DB from {GAMES_DB_URL}")
+        resp = client.get(GAMES_DB_URL, follow_redirects=True, timeout=60)
+        logger.log(f"LuaTools: Games DB download response: status={resp.status_code}")
+        resp.raise_for_status()
+        
+        data = resp.json()
+        
+        with open(file_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        
+        logger.log(f"LuaTools: Successfully downloaded Games DB")
+    except Exception as exc:
+        logger.warn(f"LuaTools: Failed to download Games DB: {exc}")
+
+
+def init_games_db() -> None:
+    """Initialize the games database: download if needed, then load into memory."""
+    try:
+        _ensure_games_db_file()
+        _load_games_db_into_memory()
+    except Exception as exc:
+        logger.warn(f"LuaTools: Games DB initialization failed: {exc}")
+
+
+def get_games_database() -> str:
+    """Get the games database as JSON string."""
+    if not GAMES_DB_LOADED:
+        init_games_db()
+    
+    with GAMES_DB_LOCK:
+        return json.dumps(GAMES_DB_DATA)
 
 
 def fetch_app_name(appid: int) -> str:
@@ -462,7 +551,7 @@ def _download_zip_for_app(appid: int):
     dest_path = os.path.join(dest_root, f"{appid}.zip")
     _set_download_state(
         appid,
-        {"status": "checking", "currentApi": None, "bytesRead": 0, "totalBytes": 0, "dest": dest_path},
+        {"status": "checking", "currentApi": None, "bytesRead": 0, "totalBytes": 0, "dest": dest_path, "apiErrors": {}},
     )
 
     for api in apis:
@@ -486,6 +575,11 @@ def _download_zip_for_app(appid: int):
                 if code == unavailable_code:
                     continue
                 if code != success_code:
+                    # Track error code for this API
+                    state = _get_download_state(appid)
+                    api_errors = state.get("apiErrors", {})
+                    api_errors[name] = {"type": "error", "code": code}
+                    _set_download_state(appid, {"apiErrors": api_errors})
                     continue
                 total = int(resp.headers.get("Content-Length", "0") or "0")
                 _set_download_state(appid, {"status": "downloading", "bytesRead": 0, "totalBytes": total})
@@ -585,6 +679,21 @@ def _download_zip_for_app(appid: int):
             return
         except Exception as err:
             logger.warn(f"LuaTools: API '{name}' failed with error: {err}")
+            # Track error for this API - check if it's a timeout
+            error_type = "timeout" if isinstance(err, (httpx.TimeoutException, httpx.ReadTimeout, httpx.ConnectTimeout)) else "error"
+            error_code = None
+            if isinstance(err, httpx.HTTPStatusError):
+                error_code = err.response.status_code if err.response else None
+            elif hasattr(err, "response") and err.response:
+                error_code = err.response.status_code
+            
+            state = _get_download_state(appid)
+            api_errors = state.get("apiErrors", {})
+            if error_type == "timeout":
+                api_errors[name] = {"type": "timeout"}
+            else:
+                api_errors[name] = {"type": "error", "code": error_code}
+            _set_download_state(appid, {"apiErrors": api_errors})
             continue
 
     _set_download_state(appid, {"status": "failed", "error": "Not available on any API"})
@@ -743,13 +852,9 @@ def get_installed_lua_scripts() -> str:
                             game_name = APP_NAME_CACHE.get(appid, "")
 
                         # Fallback to loaded_apps file if not in cache
+                        # (_get_loaded_app_name also checks applist as fallback)
                         if not game_name:
                             game_name = _get_loaded_app_name(appid)
-
-                        # Fallback to applist if still not found (no web request)
-                        # Note: _get_loaded_app_name already checks applist, but check again here for clarity
-                        if not game_name:
-                            game_name = _get_app_name_from_applist(appid)
 
                         # Only use "Unknown Game" as last resort - don't fetch from API
                         if not game_name:
@@ -761,7 +866,6 @@ def get_installed_lua_scripts() -> str:
                         file_size = file_stat.st_size
 
                         # Format date
-                        import datetime
                         modified_time = datetime.datetime.fromtimestamp(file_stat.st_mtime)
                         formatted_date = modified_time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -804,11 +908,12 @@ __all__ = [
     "dismiss_loaded_apps",
     "fetch_app_name",
     "get_add_status",
+    "get_games_database",
     "get_icon_data_url",
     "get_installed_lua_scripts",
     "has_luatools_for_app",
     "init_applist",
+    "init_games_db",
     "read_loaded_apps",
     "start_add_via_luatools",
 ]
-
